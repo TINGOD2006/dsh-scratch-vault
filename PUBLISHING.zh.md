@@ -123,3 +123,27 @@ git push origin add-dsh-scratch-vault
 ## 為什麼安裝後一定要重啟
 
 載入器在開機時建好模組圖，並以解析後的 URL 為 key 快取每個模組。停用再啟用 bundle 只會重跑**快取模組**的 `apply()`，不會重新 import 檔案。所以安裝、升級，以及任何 `lib/` 改動，都必須完整重啟 DSH 才會生效。判斷是否真的載入新版本，看 `<vaultDir>/shell-roots.log` 最後一行的 build tag。
+
+## 疑難排解
+
+### 從 DSH 工作階段內推送會失敗
+
+在 DSH 受限 shell 裡執行 `git push`，會依序撞到兩件事：
+
+1. `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)`
+   受限權杖拿不到 Windows 的 TLS 認證。可改用 Git 內附的 OpenSSL：
+   `git config http.sslBackend openssl`（本倉庫已設好）。
+2. `sh.exe: *** fatal error - couldn't create signal pipe, Win32 error 5`
+   Git for Windows 一律透過 MSYS 的 `sh` 啟動 credential helper（GCM、wincred 皆然），
+   而受限 shell 不能建立具名管道。**這一條無解。**
+
+所以：只要推送需要認證，就必須在 DSH **之外**的一般 PowerShell／CMD 視窗執行，
+那裡 Git Credential Manager 會正常彈出瀏覽器登入視窗。
+
+```powershell
+cd C:\Users\TINGOD\Documents\deepseek-harness\default-workspace\dsh-scratch-vault
+git push -u origin main
+```
+
+`origin` 已設好，`http.sslBackend=openssl` 已寫入本倉庫的 `.git/config`
+（不會隨倉庫發布出去，只影響這個本機複本）。
