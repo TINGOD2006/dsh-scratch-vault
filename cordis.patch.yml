@@ -1,0 +1,16 @@
+# dsh-scratch-vault bundle patch — inserts this plugin into a profile's layer stack.
+#
+# The row id is `scratch-vault`. Per-profile configuration is NOT declared here:
+# this plugin reads its own JSON config file (see README → Configuration), so a
+# profile edit can never fail to mount because of a schema mismatch.
+#
+# `name` is this package's own name, resolved by the loader against the profile's
+# node_modules — the same shape every other published plugin uses.
+#
+# Note what this does NOT buy: the loader builds its module graph at boot and
+# caches the module by its resolved URL, so installing or upgrading the bundle
+# needs a full DSH restart, and disabling and re-enabling the row re-runs the
+# CACHED module's apply(). Any edit under lib/ needs that restart too.
+- insert:
+    - id: scratch-vault
+      name: 'dsh-scratch-vault'

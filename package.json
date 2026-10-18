@@ -1,0 +1,59 @@
+{
+  "name": "dsh-scratch-vault",
+  "version": "0.2.0",
+  "description": "Codex-style scratch execution for DeepSeek Harness: operation scripts run from a session scratch root and are collected into a plugin-owned vault, so the workspace only ever holds real deliverables. Diverts new scratch writes, and retrofits residue that was already there.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "test",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "author": "TINGOD2006",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TINGOD2006/dsh-scratch-vault.git"
+  },
+  "homepage": "https://github.com/TINGOD2006/dsh-scratch-vault#readme",
+  "bugs": {
+    "url": "https://github.com/TINGOD2006/dsh-scratch-vault/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-plugins",
+    "deepseek",
+    "deepseek-harness",
+    "plugin",
+    "scratch",
+    "workspace-hygiene",
+    "workspace-purity",
+    "sandbox",
+    "script-vault",
+    "agent-tool"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node test/classify.test.mjs && node test/intercept.test.mjs && node test/paths.test.mjs && node test/plugin.test.mjs && node test/shellroots.test.mjs && node test/shellscratch.test.mjs && node test/tools.test.mjs && node test/vault.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}
