@@ -68,13 +68,21 @@ shell 改寫刻意保守，因為**漏改一次只是少收一個檔，誤改一
 
 出現在 `cd`／`Set-Location`／`pushd` 之後的相對 token，會依那個目錄切換**實際把 shell 帶到的位置**解析，而不是一律當成相對於工作區根目錄：`cd <工作區>` 之後 `python _probe.py` 是最常見的形狀，仍會被改寫成 write 產生的那個 scratch 路徑；而 `cd …\lib` 之後的 `Get-ChildItem notes.js` 指的是真實存在的檔案，會被放過。絕對路徑沒有歧義，一律改寫（磁碟機字母完整保留）。
 
+改寫只發生在**程式位置**：直譯器／runner（`python`、`node`、`pwsh`、`bash`、`ruby`、`lua`…）的引數位置，或命令字本身（`.\_probe.ps1`）。出現在 `#` 註解、commit message、`grep` pattern 或單引號 payload 裡的檔名是**資料**——命令不是執行它，就是在另一個工作目錄下執行它——改寫這些地方只會弄壞本來能跑的命令，或把某台機器的暫存路徑烙進產出檔案。
+
 ### L4 —— 收納庫
 
 每一份被攔下的腳本都會帶 JSONL 帳本歸檔到 vault 目錄，並提供 `scratch_list`、`scratch_show`、`scratch_promote`（複製回工作區成為真正的交付物）、`scratch_purge`。
 
-`scratch_import` 用來**事後收攏**：把插件還不存在時就已經躺在工作區裡的殘留收進 vault。它會逐檔比對收納副本的位元組，確認一致之後才刪除原檔（`keepOriginal: true` 保留原檔，`dryRun: true` 兩邊都不動）。
+`scratch_import` 用來**事後收攏**：把插件還不存在時就已經躺在工作區裡的殘留收進 vault。它會逐檔比對收納副本的位元組，確認一致之後才刪除原檔（`keepOriginal: true` 保留原檔，`dryRun: true` 兩邊都不動）。這裡有兩道護欄：只收「能在 UTF-8 下逐位元組往返」的檔案——有損解碼會被存成 U+FFFD，而拿同一份解碼結果去比對永遠會過——以及**絕不刪除分類器判定受保護的檔案**，`src/`、`node_modules/` 或 `excludeGlobs` 白名單裡的路徑會被回報為 refused 並原地不動。
 
 所有對 vault 的寫入都發生在插件自己的行程裡，這點是結構性的：`<vaultDir>` 位於 `DSH_HOME` 之下，在工作區之外，因此也在沙箱可寫根之外——**agent 透過 shell 執行的程式無法寫入 vault**，沙箱內的任何工具也不行。收攏只可能在邊界的宿主這一側成立，而這些工具正好就跑在那一側。
+
+帳本本身是 append-only；唯二必須整檔改寫的操作——定期清理與 `maxVaultEntries` 裁切——都先寫暫存檔再 rename 就位，所以改寫中途被打斷也**不會截斷歷史**。讀取由一份以帳本 `stat` 為鍵的記憶體快取供應；任何其他寫入者（包括共用同一個 vault 的另一個 DSH 視窗）都會改變那個簽章，下一次讀取就重新載入。`ledger.lock` 讓跨視窗的改寫互斥：鎖被持有時，清理會**拒絕**（`busy: true`）而不是先刪掉條目目錄、再讓另一個行程把那些條目重新寫回帳本；鎖會記下持有者的 pid，所以**死行程留下的鎖會被搶**，而只是慢、但還活著的持有者不會被硬搶。
+
+有兩種失效模式是明確處理的，不靠運氣。**讀不出來的帳本不會被當成空帳本**：回報空、不快取、也拒絕改寫——從「讀不到」重寫出去，等於把空的內容蓋掉真實歷史。而**被截斷的最後一行**（append 途中斷電唯一能損壞的東西）會在下一次 append 前先補上換行，而不是讓兩筆記錄黏成一行無法解析的內容。
+
+清理會在**每次掛載**時套用一次（`autoPurge`）：保留期限是政策，不是待辦事項，收納庫不會再一直長大直到有人想起 `scratch_purge`。要完全手動就設 `autoPurge: false`。
 
 ## 設定
 
@@ -105,9 +113,12 @@ $DSH_SCRATCH_VAULT_CONFIG          # 或指向任意 JSON 檔
 | `protectDirs` | `src`、`lib`、`test` 等 | 絕不觸碰——專案真正的原始碼。 |
 | `excludeGlobs` | `[]` | 交付物白名單（工作區相對路徑）。 |
 | `treatBareRootScriptsAsScratch` | `true` | 無專案 manifest 的工作區，根目錄的腳本檔算草稿。 |
+| `autoPurge` | `true` | 插件掛載時先套用一次保留期限清理。 |
 | `retainDays` | `14` | 清理門檻。 |
 | `maxVaultEntries` | `2000` | 帳本上限，超出丟最舊。 |
 | `maxEntryBytes` | `4194304` | 超過則記帳但不存內容。 |
+
+設定檔的搜尋順序與文件一致：`<vaultDir>/scratch-vault.json` 優先，其次是 `$DSH_SCRATCH_VAULT_CONFIG` 指向的檔案，最後才是內建預設。值裡引用了**未設定**的環境變數是設定錯誤，不是目錄名：該設定會退回預設值並在掛載時記一條警告，而不是造出一個字面上叫 `%VAR%` 的目錄（shell 之後會把它展開成別的東西）。`scratch_status` 的 `configWarnings` 會列出這些被忽略的值。
 
 ### 先用 `report` 模式
 
@@ -118,13 +129,14 @@ $DSH_SCRATCH_VAULT_CONFIG          # 或指向任意 JSON 檔
 誤判成草稿會**悄悄搬走**一個使用者真的要的檔案；漏判只是留下一個助手腳本，也就是現狀。因此每個預設都偏向保留，規則順序是「最壞情況優先」：
 
 1. 命中 `excludeGlobs` → **保留**（使用者點名了這個檔案）。
-2. 目錄段落落在 `protectDirs` → **保留**（真實原始碼勝過任何草稿啟發式）。
-3. 目錄段落落在 `scratchDirNames` → **收納**。
-4. 檔名命中 `scriptNamePatterns`（`_probe.py`、`.check.mjs`、`tmp_x.sh`、`recon_*.py`）**且**副檔名在 `scriptExtensions` 內 → **收納**。副檔名閘門是必要的：少了它，`.gitignore`、`.env`、`.editorconfig` 這些正常倉庫檔都會被當成草稿名。
-5. 副檔名屬於腳本、且直接躺在**沒有專案 manifest** 的工作區根目錄 → **收納**。這條就是「草稿資料夾」與「倉庫」的分界。
-6. 其餘 → **保留**。
+2. 目的地**已經存在於磁碟上** → **保留**。存在的檔案是成品不是探針：被改寫到 scratch 的寫入事後在工作區裡不會存在，所以還躺在那裡的檔案只可能是使用者的。這條撐住了「腳本本身就是交付物」的流程——覆寫交付物、或第一次寫入後再 `edit`，都不會被搬走。
+3. 目錄段落落在 `protectDirs` → **保留**（真實原始碼勝過任何草稿啟發式）。Windows 上段落比對大小寫不敏感——`SRC` 與 `src` 是同一個目錄。
+4. 目錄段落落在 `scratchDirNames` → **收納**（同樣的大小寫規則）。
+5. 檔名命中 `scriptNamePatterns`（`_probe.py`、`.check.mjs`、`tmp_x.sh`、`recon_*.py`）**且**副檔名在 `scriptExtensions` 內 → **收納**。副檔名閘門是必要的：少了它，`.gitignore`、`.env`、`.editorconfig` 這些正常倉庫檔都會被當成草稿名。
+6. 副檔名屬於腳本、且直接躺在**沒有專案 manifest** 的工作區根目錄 → **收納**。這條就是「草稿資料夾」與「倉庫」的分界。
+7. 其餘 → **保留**。
 
-第 4 或第 5 條猜錯時，`scratch_promote` 是逃生門。
+只有第 5、6 條可能猜錯，而且兩條都只對**新檔案**生效。若使用者要的就是那個檔案本身，改寫會被 `scratch_promote` 撤銷——工具結果會直接給出條目 id 與該下的那一次呼叫——所以即使猜錯也什麼都沒丟。如果這個工作區裡「腳本本身就是交付物」，把 `treatBareRootScriptsAsScratch` 設成 `false`（或把它們列進 `excludeGlobs`），第 6 條就完全不再觸發。
 
 ## 工具
 
@@ -142,9 +154,9 @@ $DSH_SCRATCH_VAULT_CONFIG          # 或指向任意 JSON 檔
 
 - **收納庫不是安全邊界。** 它記錄插件搬走了什麼；它不會阻止一個執意用「分類器判定為交付物」的路徑把檔案寫進工作區的 agent。
 - **攔截是逐次寫入的。** 由 shell 重導向（`python … > out.py`）或由 agent 執行的程式產生的腳本，只有在 shell token 命中改寫規則時才會被處理；檔案本身不會被搬走。
-- **shell 改寫刻意少覆蓋。** shell 變數、glob、更長檔名、以及工作目錄無法靜態得知時的相對路徑都不動（見 L3），所以以這些形式引用的草稿腳本不會被改寫——改寫它反而會弄壞本來能跑的命令。
+- **shell 改寫刻意少覆蓋。** shell 變數、glob、更長檔名、工作目錄無法靜態得知時的相對路徑，以及不在程式位置的一切（`#` 註解、commit message、`grep` pattern、引號內的 payload）都不動（見 L3），所以以這些形式引用的草稿腳本不會被改寫——改寫它反而會弄壞本來能跑的命令。
 - **分類器只看檔名與位置**，不讀檔案內容。
-- **收納庫會一直長大直到清理。** `scratch_purge` 存在，但不會自動排程。
+- **保留期限是時間制，且只在掛載時套用。** `autoPurge` 每次 session 啟動清一次，所以很長的 session 仍可能累積條目；`maxVaultEntries` 上限負責兜底。
 - **`systemPrompt.section` 拿不到 per-session 路徑**（其 text 函式只收到 scope key），所以路徑走 `$DSH_SCRATCH` 而不是提示詞。
 - **`run_script` 需要 `ctx.shell`。** 沒有它就不註冊該工具，其餘各層照常運作。
 - **在沙箱內寫不了收納庫。** 它位於 `DSH_HOME` 之下、工作區之外，因此也在 `writableRoots` 之外；只有插件這一側的程式碼能收攏，agent 執行的 shell 程式不行。

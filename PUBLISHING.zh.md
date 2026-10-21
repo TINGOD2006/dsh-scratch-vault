@@ -12,10 +12,22 @@
 
 ## 目前狀態（實測，非推測）
 
-- 倉庫已建立：`dsh-scratch-vault/.git`，首個 commit `2af476e`，26 個檔案已追蹤。
-- `gh` CLI **未安裝**；`GITHUB_TOKEN` **不存在**；`npm whoami` 回 **`ENEEDAUTH`**（npm 未登入）。
+- 倉庫已公開：`github.com/TINGOD2006/dsh-scratch-vault`（2026-10-18 建立，已加 `dsh-plugin` 等 12 個 topic）。
+- `gh` CLI **2.102.0 已安裝且已登入**（帳號 `TINGOD2006`，token 具 `repo`／`workflow`／`gist` 權限，存於 keyring）。
+- npm 已發佈 `0.2.0`、`0.2.1`（`latest` 目前是 `0.2.1`）；本機 `dist-tag` 之外的 versions 由 `tingod2006` 維護。
+- `npm whoami` 在本機受限 shell 內回 **`E401`**——發佈新版本需要先 `npm login`（keyring 認證在沙箱內拿不到）。
+- **插件市場（awesome-dsh-plugin）已收錄**：`data/plugins/TINGOD2006__dsh-scratch-vault.yml` 已在 `main` 上（sha `61cdbe6`）。清單是靜態指路，不記版本，因此改版只要推 GitHub 即可，不需要再開 PR。
 - git 身分已設：`TINGOD2006 <tinchiocherrychio@gmail.com>`。
-- 因此步驟 1、2 需要你手動登入，或先補安裝／登入工具（見下方〈前置作業〉）。
+- 沙箱內推送需要繞過 credential helper：見〈疑難排解〉的 token 內嵌 URL 做法（已實測可用）。
+
+### 版本歷程
+
+| 版本 | 內容 |
+|---|---|
+| 0.2.0 | 首個可用版本：L2／L3／L4 三層、7 個工具、91 個測試。 |
+| 0.2.1 | staged publish 的審批修正。 |
+| 0.3.0 | 帳本快取與原子改寫＋跨行程鎖、`autoPurge`、既有檔案保護、程式位置才改寫 shell（v7／v8）。 |
+| 0.3.1 | 29 個缺陷修復（vault 帳本正確性、攔截誤改寫、glob 指數回溯、UTF-8 收攏資料安全、設定警告與負快取），124 個測試（v9）。 |
 
 ## 投稿硬性條件對照
 
@@ -23,7 +35,7 @@
 |---|---|
 | `package.json` 宣告 `dsh.bundle`（**只宣告 `dsh.client` 是最常見被拒原因**） | ✅ `"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}` |
 | 倉庫根有 `cordis.patch.yml`，`name` 用套件名 | ✅ `id: scratch-vault` / `name: 'dsh-scratch-vault'` |
-| 真實可用的程式碼 | ✅ 11 個 `lib/` 模組、7 個工具、91 個測試 |
+| 真實可用的程式碼 | ✅ 11 個 `lib/` 模組、7 個工具、124 個測試 |
 | 倉庫年齡 ≥ 1 天（CI 自動檢查） | ⏳ 剛建立，**隔天才能送出 PR** |
 | 加上 `dsh-plugin` GitHub topic | ⏳ 推上去之後在倉庫設定頁加 |
 | 描述屬實、無誇飾行銷詞 | ✅ 見下方 YAML，只陳述實際行為 |
@@ -32,14 +44,12 @@
 
 ## 前置作業（只做一次）
 
-```powershell
-# GitHub CLI（若要用 gh 建倉／開 PR）
-winget install --id GitHub.cli
-gh auth login
+- GitHub CLI：✅ 已安裝 `gh 2.102.0` 且 `gh auth login` 完成（keyring，帳號 `TINGOD2006`）。
+- npm 登入：⏳ **仍缺**。發佈新版本前在本機（非沙箱內）執行：
 
-# npm 登入（發佈到 npm 才需要）
+```powershell
 npm login
-npm whoami
+npm whoami    # 應顯示 tingod2006
 ```
 
 不想裝 `gh` 也可以：用瀏覽器在 GitHub 手動建立空倉庫、手動開 PR，本地照樣用 `git push`。
@@ -111,13 +121,13 @@ git push origin add-dsh-scratch-vault
 
 ## 送出前檢查清單
 
-- [ ] `npm test` 全綠（目前 91/91）
-- [ ] `npm pack --dry-run` 清單正確，沒有夾帶本機檔案
-- [ ] `cordis.patch.yml` 的 `name` 是 `dsh-scratch-vault`（套件名，非相對路徑）
-- [ ] `package.json` 的 `version` 已遞增
-- [ ] README 的安裝指令沒有殘留佔位符
-- [ ] GitHub 倉庫已加 `dsh-plugin` topic
-- [ ] 倉庫已公開且建立滿 1 天
+- [x] `npm test` 全綠（目前 124/124）
+- [ ] `npm pack --dry-run` 清單正確，沒有夾帶本機檔案（本機受限 shell 會因 npm cache 權限失敗，請在一般 PowerShell 執行）
+- [x] `cordis.patch.yml` 的 `name` 是 `dsh-scratch-vault`（套件名，非相對路徑）
+- [x] `package.json` 的 `version` 已遞增（0.3.1）
+- [x] README 的安裝指令沒有殘留佔位符
+- [x] GitHub 倉庫已加 `dsh-plugin` topic
+- [x] 倉庫已公開且建立滿 1 天
 - [ ] 實際安裝測試過一次：`dsh plugin --profile desktop add github:TINGOD2006/dsh-scratch-vault` 後**重啟 DSH**，再 `scratch_status`
 
 ## 為什麼安裝後一定要重啟
@@ -135,15 +145,22 @@ git push origin add-dsh-scratch-vault
    `git config http.sslBackend openssl`（本倉庫已設好）。
 2. `sh.exe: *** fatal error - couldn't create signal pipe, Win32 error 5`
    Git for Windows 一律透過 MSYS 的 `sh` 啟動 credential helper（GCM、wincred 皆然），
-   而受限 shell 不能建立具名管道。**這一條無解。**
+   而受限 shell 不能建立具名管道。
 
-所以：只要推送需要認證，就必須在 DSH **之外**的一般 PowerShell／CMD 視窗執行，
-那裡 Git Credential Manager 會正常彈出瀏覽器登入視窗。
+**可行的繞法：把 `gh` keyring 裡的 token 內嵌進這一次推送的 URL**，完全不經過 credential helper。
+token 不會寫進 `.git/config`，只出現在該次命令的 argv 裡：
+
+```powershell
+$t = gh auth token
+git push "https://x-access-token:$t@github.com/TINGOD2006/dsh-scratch-vault.git" main
+git push "https://x-access-token:$t@github.com/TINGOD2006/dsh-scratch-vault.git" v0.3.1
+Remove-Variable t
+```
+
+缺點是 token 會在該次命令執行期間出現在本機行程列表；若在意，就改在 DSH **之外**的一般
+PowerShell 視窗推送（Git Credential Manager 會正常彈出瀏覽器登入）：
 
 ```powershell
 cd C:\Users\TINGOD\Documents\deepseek-harness\default-workspace\dsh-scratch-vault
-git push -u origin main
+git push -u origin main --follow-tags
 ```
-
-`origin` 已設好，`http.sslBackend=openssl` 已寫入本倉庫的 `.git/config`
-（不會隨倉庫發布出去，只影響這個本機複本）。

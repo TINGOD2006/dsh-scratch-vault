@@ -45,6 +45,23 @@ test('a protected directory beats a scratch-shaped name', () => {
   assert.equal(d.rule, RULES.PROTECTED_DIR)
 })
 
+// Windows paths are case-insensitive, so `SRC` IS `src` on disk. Comparing the
+// segments byte-exactly meant `SRC/_probe.py` — a script inside the user's real
+// source tree — was moved out of the workspace while `src/_probe.py` was protected,
+// which is the one failure the classifier is ordered to avoid.
+test('directory protection follows the filesystem case rules', () => {
+  const d = classifyWrite({ ...noProject, absolutePath: at('SRC/_probe.py') })
+  if (process.platform === 'win32') {
+    assert.equal(d.action, 'keep')
+    assert.equal(d.rule, RULES.PROTECTED_DIR)
+  } else {
+    // On a case-sensitive filesystem `SRC` is a different directory, and nothing
+    // protects it — the scratch-shaped name wins.
+    assert.equal(d.action, 'vault')
+    assert.equal(d.rule, RULES.SCRATCH_NAME)
+  }
+})
+
 test('a scratch directory marks everything beneath it', () => {
   const d = classifyWrite({ ...project, absolutePath: at('tmp/convert.py') })
   assert.equal(d.action, 'vault')
@@ -138,3 +155,34 @@ test('a scratch-sounding name WITH a script extension is still vaulted', () => {
   assert.equal(d.action, 'vault')
   assert.equal(d.rule, RULES.SCRATCH_NAME)
 })
+
+// Rule 2: the user's goal may BE the script. An existing file is an artifact, and
+// updating it (write over, or edit) must never move it — a redirected probe never
+// exists in the workspace afterwards, so presence on disk can only mean "real".
+test('a target that already exists is kept, whatever its name', () => {
+  for (const rel of ['_probe.py', '.check.mjs', 'tmp/convert.py', 'amiya_batch.py']) {
+    const d = classifyWrite({ ...noProject, absolutePath: at(rel), targetExists: true })
+    assert.equal(d.action, 'keep', `${rel} exists, so it must be kept`)
+    assert.equal(d.rule, RULES.EXISTING_FILE, `${rel} must match the existing-file rule`)
+  }
+})
+
+test('explicit allowlist still outranks the existing-file rule', () => {
+  const withExclude = normalizeConfig({ excludeGlobs: ['amiya_batch.py'] })
+  const d = classifyWrite({
+    config: withExclude,
+    workspaceRoot: ROOT,
+    projectRoot: false,
+    absolutePath: at('amiya_batch.py'),
+    targetExists: true,
+  })
+  assert.equal(d.action, 'keep')
+  assert.equal(d.rule, RULES.EXCLUDED, 'the user-named file is reported as such, not as merely existing')
+})
+
+test('targetExists defaults to "not present", so a new probe is still vaulted', () => {
+  const d = classifyWrite({ ...noProject, absolutePath: at('_probe.py') })
+  assert.equal(d.action, 'vault')
+  assert.equal(d.rule, RULES.SCRATCH_NAME)
+})
+

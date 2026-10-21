@@ -1,8 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolve } from 'node:path'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 
-import { decideExecution, rewriteCommand } from '../lib/intercept.js'
+import { decideExecution, installInterception, rewriteCommand } from '../lib/intercept.js'
 import { normalizeConfig } from '../lib/config.js'
 import { scratchPathFor } from '../lib/paths.js'
 import { workspaceRootOf } from '../lib/prompt.js'
@@ -46,6 +48,33 @@ test('a deliverable write is not touched', () => {
   const decision = decideExecution(exec('report.csv'), context())
   assert.equal(decision.action, 'keep')
   assert.equal(decision.scratchPath, undefined)
+})
+
+// The user's goal may BE the script. A file that already exists in the workspace is
+// an artifact — writing over it or editing it must not move it. Without this guard,
+// iterating on a deliverable script (`write` twice, or `edit` after `write`) would
+// silently divert the user's own file on the SECOND call, which is precisely the
+// "false positive" the classifier is ordered to avoid.
+test('writing over an existing script leaves it in the workspace', () => {
+  const absolute = resolve(ROOT, '_probe.py')
+  const decision = decideExecution(exec('_probe.py'), context({ existing: [absolute] }))
+  assert.equal(decision.action, 'keep')
+  assert.equal(decision.rule, 'existing-file')
+  assert.equal(decision.scratchPath, undefined, 'an existing file must not get a scratch path')
+})
+
+test('editing an existing deliverable script leaves it in the workspace', () => {
+  const absolute = resolve(ROOT, 'convert.py')
+  const editExec = { name: 'edit', callId: 'c3', arguments: { file_path: 'convert.py' }, agent: { id: 'sess-1' } }
+  const decision = decideExecution(editExec, context({ existing: [absolute] }))
+  assert.equal(decision.action, 'keep')
+  assert.equal(decision.scratchPath, undefined)
+})
+
+test('a throwing exists() degrades to "not present", never to a failed call', () => {
+  const exploding = { ...context(), exists: () => { throw new Error('EACCES') } }
+  const decision = decideExecution(exec('_probe.py'), exploding)
+  assert.equal(decision.action, 'vault', 'a stat failure must not disable interception')
 })
 
 test('report mode decides but produces no scratch path', () => {
@@ -343,3 +372,184 @@ test('a realistically-shaped execution is intercepted end to end', () => {
     }),
   )
 })
+
+// --- shell rewriting must not rewrite DATA
+//
+// Rewriting anything path-shaped was too aggressive: a script name in a comment, in
+// a commit message, in a grep pattern or in a here-string that *generates* a script
+// is text, not a program this command runs. Rewriting those either breaks a working
+// command or bakes a machine-specific temp path into a deliverable.
+test('a script name mentioned in a comment is not a program the command runs', () => {
+  const command = 'Get-ChildItem *.txt; # python _probe.py no longer needed'
+  const { command: out, rewrites } = rewriteCommand(command, context())
+  assert.equal(rewrites.length, 0)
+  assert.equal(out, command)
+})
+
+test('an argument to a non-interpreter program is left alone', () => {
+  const commands = [
+    'grep -q "_probe.py" docs/notes.txt',
+    'git commit -m "rerun _probe.py before release"',
+    'Get-Content _probe.py',
+    'Select-String -Pattern _probe.py README.md',
+  ]
+  for (const command of commands) {
+    const { command: out, rewrites } = rewriteCommand(command, context())
+    assert.equal(rewrites.length, 0, `rewrote data in: ${command}`)
+    assert.equal(out, command)
+  }
+})
+
+// A single-quoted run is a payload (`sh -c '…'`) or a here-string body: its working
+// directory is not the one this command has, so rebasing a token inside it against
+// the workspace turns a working command into ENOENT.
+test('a single-quoted shell payload is left exactly as written', () => {
+  const command = "sh -c 'cd build && python _diag.mjs'"
+  const { command: out, rewrites } = rewriteCommand(command, context())
+  assert.equal(rewrites.length, 0)
+  assert.equal(out, command)
+})
+
+test('an interpreter flag does not hide the script argument', () => {
+  const { rewrites } = rewriteCommand('python -u _probe.py', context())
+  assert.equal(rewrites.length, 1)
+  const fileFlag = rewriteCommand('pwsh -NoProfile -File _probe.ps1', context())
+  assert.equal(fileFlag.rewrites.length, 1)
+  // `cmd /c` is the Windows idiom for running a .bat/.cmd file in place.
+  const viaCmd = rewriteCommand('cmd /c helper_tmp.bat', context())
+  assert.equal(viaCmd.rewrites.length, 1)
+})
+
+// --- the L3 listeners ------------------------------------------------------
+
+const liveExec = (filePath, callId = 'c-live') => ({
+  name: 'write',
+  callId,
+  arguments: { file_path: filePath },
+  agent: { id: 'sess-1', session: { header: { cwd: ROOT }, id: 'sess-1' } },
+})
+
+function listenerHarness(options = {}) {
+  const handlers = new Map()
+  const warnings = []
+  const ctx = {
+    on(event, handler) {
+      if (!handlers.has(event)) handlers.set(event, [])
+      handlers.get(event).push(handler)
+      return () => {}
+    },
+    logger: { warn: (message) => warnings.push(message) },
+  }
+  const recorded = []
+  const vault = {
+    record(record) {
+      recorded.push(record)
+      return { id: 'entry-test', stored: true }
+    },
+  }
+  const scratchRoot = options.scratchRoot ?? mkdtempSync(join(tmpdir(), 'sv-intercept-'))
+  const cfg = options.config ?? normalizeConfig({ scratchRoot })
+  const installed = installInterception(ctx, { config: cfg, vault, scratchRootFor: () => scratchRoot })
+
+  const run = async (event, ...args) => {
+    const list = handlers.get(event) ?? []
+    let index = 0
+    const next = async () => {
+      if (index >= list.length) return { kind: 'accept' }
+      const handler = list[index]
+      index += 1
+      return handler(...args, next)
+    }
+    return next()
+  }
+
+  return { run, recorded, warnings, installed, scratchRoot }
+}
+
+test('a redirected write is archived and annotated with the real path', async () => {
+  const h = listenerHarness()
+  try {
+    const exec = liveExec('_probe.py')
+    await h.run('tools/execute', exec)
+    assert.notEqual(exec.arguments.file_path, '_probe.py', 'the write must be redirected')
+
+    mkdirSync(dirname(exec.arguments.file_path), { recursive: true })
+    writeFileSync(exec.arguments.file_path, 'print(1)\n', 'utf8')
+    const result = await h.run('tools/post-execute', exec, { content: [{ type: 'text', text: 'ok' }] })
+
+    assert.equal(h.recorded.length, 1)
+    assert.equal(h.recorded[0].content, 'print(1)\n')
+    const note = result.content.at(-1).text
+    assert.match(note, /was written to/)
+    assert.match(note, /Archived as vault entry entry-test/)
+    // The one call that undoes a mistaken redirect has to be named in the result,
+    // not left for the model to infer from the prompt.
+    assert.match(note, /scratch_promote/)
+  } finally {
+    rmSync(h.scratchRoot, { recursive: true, force: true })
+  }
+})
+
+// A failed write was NOT written. Annotating it with "was written to … run it by
+// that absolute path" sends the model after a file that does not exist — and the
+// case is real: `write` + `edit` of the same path in one parallel dispatch.
+test('a failed write is never annotated as a successful one', async () => {
+  const h = listenerHarness()
+  try {
+    const exec = liveExec('_probe.py', 'c-error')
+    await h.run('tools/execute', exec)
+    const result = await h.run('tools/post-execute', exec, {
+      isError: true,
+      content: [{ type: 'text', text: 'Error: boom' }],
+    })
+    assert.equal(h.recorded.length, 0, 'nothing was written, so nothing may be archived')
+    assert.equal(result.content, undefined, 'the failure must pass through untouched')
+  } finally {
+    rmSync(h.scratchRoot, { recursive: true, force: true })
+  }
+})
+
+test('a result whose content is not an array is passed through, not replaced', async () => {
+  const h = listenerHarness()
+  try {
+    const exec = liveExec('_probe.py', 'c-shape')
+    await h.run('tools/execute', exec)
+    const result = await h.run('tools/post-execute', exec, { isError: false, content: 'weird' })
+    assert.equal(result.content, undefined)
+  } finally {
+    rmSync(h.scratchRoot, { recursive: true, force: true })
+  }
+})
+
+// Falling back to the host cwd here would make every workspace path look
+// "outside-workspace" and switch interception off silently, so an unattributable
+// execution is skipped and reported instead.
+test('an execution with no resolvable workspace root is skipped, not guessed', async () => {
+  const h = listenerHarness()
+  try {
+    const exec = { name: 'write', callId: 'c-no-root', arguments: { file_path: '_probe.py' }, agent: { id: 'sess-1' } }
+    await h.run('tools/execute', exec)
+    assert.equal(exec.arguments.file_path, '_probe.py')
+    assert.ok(h.warnings.some((message) => /workspace root/.test(message)))
+  } finally {
+    rmSync(h.scratchRoot, { recursive: true, force: true })
+  }
+})
+
+test('the pending map stays bounded when post-execute never runs', async () => {
+  const scratchRoot = mkdtempSync(join(tmpdir(), 'sv-intercept-'))
+  const h = listenerHarness({
+    scratchRoot,
+    config: normalizeConfig({ scratchRoot, maxPendingRewrites: 16 }),
+  })
+  try {
+    for (let index = 0; index < 24; index += 1) {
+      await h.run('tools/execute', liveExec(`_probe_${index}.py`, `c-${index}`))
+    }
+    assert.ok(h.installed.pending.size <= 16, 'an unsettled call must not leak a record forever')
+    assert.ok(h.warnings.some((message) => /dropped a pending rewrite/.test(message)))
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true })
+  }
+})
+

@@ -255,6 +255,45 @@ test('keepOriginal collects the script and leaves the workspace copy alone', asy
   }
 })
 
+test('a non-UTF-8 file is refused instead of mangled and then deleted', async () => {
+  const h = harness()
+  try {
+    // `readFileSync(path, 'utf8')` turns these bytes into U+FFFD, and comparing the
+    // vault copy against the SAME lossy decode always passes — so the old flow
+    // deleted the only intact copy and kept mangled text.
+    const bytes = Buffer.from([0x61, 0xb8, 0xe9, 0xff, 0x62])
+    const file = join(h.workspace, '_probe.py')
+    writeFileSync(file, bytes)
+
+    const result = await h.call('scratch_import', { paths: ['_probe.py'] })
+
+    assert.equal(result.results[0].status, 'not-utf8')
+    assert.ok(existsSync(file), 'the original must survive')
+    assert.ok(readFileSync(file).equals(bytes), 'the original must be byte-identical')
+    assert.deepEqual(h.vault.all(), [])
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('a protected source file is never collected or deleted', async () => {
+  const h = harness({ projectManifest: true })
+  try {
+    mkdirSync(join(h.workspace, 'src'), { recursive: true })
+    const file = join(h.workspace, 'src', '_probe.py')
+    writeFileSync(file, 'y = 3\n', 'utf8')
+
+    const result = await h.call('scratch_import', { paths: ['src/_probe.py'] })
+
+    assert.equal(result.summary.refused, 1)
+    assert.equal(result.results[0].rule, 'protected-dir')
+    assert.ok(existsSync(file))
+    assert.deepEqual(h.vault.all(), [])
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('paths outside the workspace are refused', async () => {
   const h = harness()
   try {

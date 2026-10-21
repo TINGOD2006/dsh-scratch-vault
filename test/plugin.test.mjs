@@ -13,7 +13,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../lib/index.js'
@@ -162,5 +162,66 @@ test('apply() survives a composition that mounts nothing but the tool registry',
     assert.deepEqual([...installed.tools].sort(), [...TOOL_NAMES].sort())
     assert.ok(Array.isArray(installed.prompt))
     assert.equal(installed.interception, true)
+  })
+})
+
+/** Seed a vault with one entry that is outside the default 14-day window. */
+function seedExpiredVault(home) {
+  const vaultDir = join(home, 'scratch-vault')
+  const id = '20200101000000-seed01'
+  mkdirSync(join(vaultDir, 'entries', id), { recursive: true })
+  writeFileSync(join(vaultDir, 'entries', id, 'script'), 'print(1)\n', 'utf8')
+  const entry = {
+    id,
+    ts: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    sessionId: 's',
+    originalPath: '_probe.py',
+    bytes: 9,
+    stored: true,
+  }
+  writeFileSync(join(vaultDir, 'index.jsonl'), `${JSON.stringify(entry)}\n`, 'utf8')
+  return { vaultDir, id }
+}
+
+// Retention used to be a documented limitation: the vault grew until someone
+// remembered `scratch_purge`. A mount is the one moment a session is guaranteed
+// idle, so it is where the window is applied.
+test('apply() applies the retention window once per mount', () => {
+  withTempHome((home) => {
+    const { vaultDir, id } = seedExpiredVault(home)
+
+    const h = stubContext()
+    const installed = plugin.apply(h.ctx)
+
+    assert.equal(installed.purged, 1, 'the mount must report what retention removed')
+    assert.equal(existsSync(join(vaultDir, 'entries', id)), false, 'the collected script is gone')
+    assert.equal(readFileSync(join(vaultDir, 'index.jsonl'), 'utf8'), '', 'the ledger is empty')
+  })
+})
+
+test('autoPurge=false leaves the vault alone', () => {
+  withTempHome((home) => {
+    const { vaultDir, id } = seedExpiredVault(home)
+    writeFileSync(join(vaultDir, 'scratch-vault.json'), JSON.stringify({ autoPurge: false }), 'utf8')
+
+    const h = stubContext()
+    const installed = plugin.apply(h.ctx)
+
+    assert.equal(installed.purged, 0)
+    assert.ok(existsSync(join(vaultDir, 'entries', id)), 'the entry survives when retention is manual')
+  })
+})
+
+test('scratch_status reports the retention policy alongside the rest of the config', () => {
+  withTempHome(() => {
+    const h = stubContext()
+    plugin.apply(h.ctx)
+
+    const handler = h.tools.get('scratch_status')
+    const result = handler.execute({}, { agent: { id: 'sess-1' } })
+
+    assert.equal(typeof result.autoPurge, 'boolean')
+    assert.equal(result.autoPurge, true)
+    assert.equal(typeof result.retainDays, 'number')
   })
 })

@@ -119,6 +119,14 @@ the scratch path the write produced, while `cd …\lib` then `Get-ChildItem note
 refers to a real file and is left alone. Absolute paths stay unambiguous and are
 always redirected, drive letter included.
 
+A token is only rewritten in a **program position**: the argument slot of an
+interpreter or runner (`python`, `node`, `pwsh`, `bash`, `ruby`, `lua`, …) or the
+command word itself (`.\_probe.ps1`). A script name in a `#` comment, a commit
+message, a `grep` pattern or a single-quoted shell payload is *data* — either the
+command does not run it, or it runs it under a different working directory — and
+rewriting it there breaks a command that used to work or bakes a machine-specific
+temp path into a generated file.
+
 ### L4 — the vault
 
 Every intercepted script is archived under the vault directory with a JSONL
@@ -128,7 +136,12 @@ into the workspace as a real deliverable) and `scratch_purge`.
 `scratch_import` retrofits residue that was already in the workspace before the
 plugin existed: it collects the paths you name, verifies the vault copy
 byte-for-byte, and only then removes the original (`keepOriginal: true` keeps it,
-`dryRun: true` reports without touching either side).
+`dryRun: true` reports without touching either side). Two guard rails matter here:
+it only collects files whose bytes survive a UTF-8 round trip — a lossy decode
+would be stored as U+FFFD, and "verifying" the vault copy against the same decode
+would always pass — and it never deletes a file the classifier protects. A path
+inside `src/`, `node_modules/` or an `excludeGlobs` allowlist entry is reported as
+refused and left exactly where it is.
 
 Every vault write happens inside the plugin's own process, and that is load
 bearing. `<vaultDir>` lives under `DSH_HOME`, outside the session workspace and
@@ -136,6 +149,28 @@ therefore outside the sandbox's writable roots: a program the agent runs through
 the shell **cannot** write the vault, and neither can a sandboxed tool.
 Collection only works on the host side of that boundary — which is precisely
 where these tools run.
+
+The ledger is append-only, and the two operations that must rewrite it anyway —
+the retention purge and the `maxVaultEntries` trim — write a temporary file and
+rename it into place, so an interrupted rewrite can never truncate the history.
+Reads are served from an in-memory cache keyed by the ledger's `stat`; any other
+writer, including a second DSH window sharing the vault, changes that signature
+and the next read reloads. A `ledger.lock` serializes rewrites between windows:
+when it is held, a purge declines (`busy: true`) instead of deleting entry
+directories the other writer is about to re-advertise. The lock names its owner's
+pid, so a lock left by a dead process is stolen while a slow-but-alive holder is
+left alone.
+
+Two failure modes are handled explicitly rather than by luck. A ledger that exists
+but cannot be read is never treated as an empty one — reporting nothing, caching
+nothing, and refusing to rewrite, because rewriting an unreadable ledger would
+persist the emptiness over real history. And a torn final line, the one thing a
+crashed append can damage, is re-terminated before the next append instead of
+fusing two records into one unparsable line.
+
+Retention is applied at every mount (`autoPurge`): the window is a policy, not a
+chore, so the vault does not grow until someone remembers `scratch_purge`. Set
+`autoPurge: false` to keep it fully manual.
 
 ## Configuration
 
@@ -170,9 +205,17 @@ Every key is optional; missing keys fall back to the built-in defaults.
 | `protectDirs` | `src`, `lib`, `test`, … | Never touched — a project's real source. |
 | `excludeGlobs` | `[]` | Deliverable allowlist, workspace-relative. |
 | `treatBareRootScriptsAsScratch` | `true` | A script at the root of a workspace with no project manifest is scratch. |
+| `autoPurge` | `true` | Run one retention purge when the plugin mounts. |
 | `retainDays` | `14` | Purge cutoff. |
 | `maxVaultEntries` | `2000` | Ledger cap; oldest are dropped. |
 | `maxEntryBytes` | `4194304` | Above this the entry is recorded but its bytes are not stored. |
+
+Settings are discovered in the documented order: `<vaultDir>/scratch-vault.json`
+first, then the file `$DSH_SCRATCH_VAULT_CONFIG` points at, then the built-in
+defaults. A value that references an environment variable that is not set is a
+configuration error, not a directory name: the setting falls back to its default
+and the mount logs a warning instead of creating a literal `%VAR%` directory that
+a shell would expand to something else anyway.
 
 ### Start with `report` mode
 
@@ -187,20 +230,31 @@ leaves a helper script behind — the status quo. Every default therefore leans
 toward keeping the file, and the rules are ordered worst-case-first:
 
 1. `excludeGlobs` matched → **keep** (the user named this file).
-2. A directory segment is in `protectDirs` → **keep** (real source wins over any
-   scratch heuristic).
-3. A directory segment is in `scratchDirNames` → **vault**.
-4. The base name matches `scriptNamePatterns` (`_probe.py`, `.check.mjs`,
+2. The destination already exists on disk → **keep**. An existing file is an
+   artifact, not a probe: a redirected scratch write never exists in the workspace
+   afterwards, so anything already there belongs to the user. This is what keeps
+   "the script IS the deliverable" workflows intact — writing over a deliverable,
+   or editing it after the first write, never moves it.
+3. A directory segment is in `protectDirs` → **keep** (real source wins over any
+   scratch heuristic). Segments are compared case-insensitively on Windows, where
+   `SRC` and `src` are the same directory.
+4. A directory segment is in `scratchDirNames` → **vault** (same case rule).
+5. The base name matches `scriptNamePatterns` (`_probe.py`, `.check.mjs`,
    `tmp_x.sh`, `recon_*.py`) **and** its extension is in `scriptExtensions` →
    **vault**. The extension gate is what keeps `.gitignore`, `.env` and
    `.editorconfig` out of the vault — their names look like scratch files, but
    they are ordinary repository files.
-5. A script-extension file sits directly at the root of a workspace with **no**
+6. A script-extension file sits directly at the root of a workspace with **no**
    project manifest → **vault**. This is the rule that separates "a scratch
    folder" from "a repository".
-6. Otherwise → **keep**.
+7. Otherwise → **keep**.
 
-`scratch_promote` is the escape hatch for rule 4 or 5 guessing wrong.
+Rules 5 and 6 are the only ones that can guess wrong, and both only fire on a
+**new** file. If the user asked for that file itself, the redirect is undone by
+`scratch_promote` — the tool result names the entry id and the exact call to make
+— so nothing is lost even in the misjudged case. In a workspace where scripts
+genuinely ARE the deliverable, set `treatBareRootScriptsAsScratch: false` (or list
+them in `excludeGlobs`) and rule 6 stops firing.
 
 ## The tools
 
@@ -223,11 +277,14 @@ toward keeping the file, and the rules are ordered worst-case-first:
   (`python … > out.py`) or by a program the agent runs is only caught if the
   shell token matched a rewritten reference; the file itself is not moved.
 - **The shell rewriter under-covers on purpose.** Shell variables, globs, longer
-  filenames and relative paths after a `cd` are all left untouched (see L3), so a
-  scratch script referenced in one of those shapes is not redirected. Redirecting
-  it would have broken a working command.
+  filenames, relative paths after a `cd`, and anything that is not in a program
+  position (a comment, a commit message, a `grep` pattern, a quoted payload) are
+  left untouched (see L3), so a scratch script referenced in one of those shapes is
+  not redirected. Redirecting it would have broken a working command.
 - **The classifier is name- and location-based.** It does not read the file.
-- **The vault grows until purged.** `scratch_purge` exists; it is not scheduled.
+- **Retention is time-based and runs at mount.** `autoPurge` applies `retainDays`
+  once per session start, so a long session can still accumulate entries; the
+  `maxVaultEntries` cap bounds that.
 - **`systemPrompt.section` cannot name the per-session path** (its text function
   receives only a scope key), which is why the path travels through
   `$DSH_SCRATCH` instead of the prompt.

@@ -31,18 +31,18 @@ cd C:\Users\TINGOD\Documents\deepseek-harness\default-workspace\dsh-scratch-vaul
 npm test
 ```
 
-目前：**91 tests / 91 pass / 0 fail**（exit 0）。
+目前：**124 tests / 124 pass / 0 fail**（exit 0）。
 
 | 檔案 | 數量 | 覆蓋 |
 |---|---|---|
-| `test/classify.test.mjs` | 13 | 六條分類規則、最壞情況優先、保護目錄勝過可疑檔名 |
-| `test/intercept.test.mjs` | 22 | 改寫決策、glob 不被破壞、**shell 變數不被破壞**、**cd 後相對路徑按有效工作目錄解析**、**磁碟機字母完整保留**、**workspace root 解析**（見下方迴歸） |
-| `test/paths.test.mjs` | 7 | `scratchPathFor` 純函式映射、工作區內目錄結構保留 |
-| `test/plugin.test.mjs` | 4 | 直接 `import` + `apply(stubCtx)`，走宿主載入時的同一條模組圖 |
-| `test/shellroots.test.mjs` | 13 | per-session 探針、快取、失敗回退 |
+| `test/classify.test.mjs` | 19 | 分類規則、最壞情況優先、保護目錄勝過可疑檔名、**既有檔案一律保留**、**Windows 大小寫不敏感的目錄保護**（見下方迴歸） |
+| `test/intercept.test.mjs` | 34 | 改寫決策、glob 不被破壞、**shell 變數不被破壞**、**cd 後相對路徑按有效工作目錄解析**、**磁碟機字母完整保留**、**workspace root 解析**、**既有目標不被搬走**、**失敗的寫入不被標成成功**、**只在程式位置改寫**、**pending 上限**（見下方迴歸） |
+| `test/paths.test.mjs` | 9 | `scratchPathFor` 純函式映射、工作區內目錄結構保留、**淨化後不碰撞**、**病理 glob 不回溯爆炸** |
+| `test/plugin.test.mjs` | 7 | 直接 `import` + `apply(stubCtx)`，走宿主載入時的同一條模組圖；**掛載時套用保留期限**、`autoPurge: false` 不清理 |
+| `test/shellroots.test.mjs` | 15 | per-session 探針、快取、**失敗也快取（不重探）**、**scratchRoot 落在工作區內時改用私有 temp** |
 | `test/shellscratch.test.mjs` | 6 | `%TEMP%` 解析、`isUsableDirectory` |
-| `test/tools.test.mjs` | 15 | 七個工具、`scratch_import` 的 dryRun / keepOriginal、`run_script` 傳遞 `dshEnv` |
-| `test/vault.test.mjs` | 8 | JSONL 帳本、去重、purge、容量上限 |
+| `test/tools.test.mjs` | 18 | 七個工具、`scratch_import` 的 dryRun / keepOriginal、**非 UTF-8 檔案不刪原檔**、**受保護路徑不被收攏**、`run_script` 傳遞 `dshEnv` |
+| `test/vault.test.mjs` | 16 | JSONL 帳本、去重、purge、容量上限、**帳本快取失效**、**原子改寫不留暫存檔**、**改寫保留他行程 append 的行**、**ledger.lock 互斥與死行程搶鎖**、**讀不到的帳本不當成空的**、**撕裂行救援** |
 
 ### 陷阱：`node --test test/` 會失敗，這是正常的
 
@@ -129,6 +129,65 @@ python C:C:\scratch\sess-1\workspace\_probe.py
 
 一個無法解析的路徑。修法是把 `(?:[A-Za-z]:)?` 併入 pattern，讓磁碟機字母留在匹配之內。
 
+#### (5) 交付物本身是一支一次性腳本，被搬走
+
+分類器只看「名字像不像草稿」和「位置像不像草稿」，看不到使用者的意圖。當使用者要的交付物**就是**那支腳本
+（「給我一支能跑一次的轉換腳本」），一次 `write` 會把它送進 vault。更糟的形狀是**第二次**寫入：第一次被搬走
+（工作區裡沒有檔案），第二次覆寫交付物時，工作區仍然沒有檔案，於是**再被搬一次**——使用者永遠拿不到。
+
+修法是在分類器最前面（只輸給 `excludeGlobs`）加一條「目的地已存在 → 保留」：被改寫的寫入事後在工作區裡不
+存在，所以磁碟上已經有的檔案，只可能是使用者的。同時在改寫註記裡附上可以直接照抄的
+`scratch_promote({ id, targetPath })`，讓「猜錯要還原」變成一步。
+
+覆蓋它的測試：`test/classify.test.mjs` 的
+`a target that already exists is kept, whatever its name`、
+`explicit allowlist still outranks the existing-file rule`、
+`targetExists defaults to "not present", so a new probe is still vaulted`；
+`test/intercept.test.mjs` 的
+`writing over an existing script leaves it in the workspace`、
+`editing an existing deliverable script leaves it in the workspace`、
+`a throwing exists() degrades to "not present", never to a failed call`。
+
+#### (6) 改寫把「資料」當成「指令」
+
+舊版只要 token 長得像腳本檔就改寫，於是不執行那支檔的地方也被改：
+
+```powershell
+grep -q "_probe.py" docs/notes.txt   # pattern 被改成絕對 scratch 路徑 → grep 回 1
+git commit -m "rerun _probe.py"      # commit message 裡烙進某台機器的暫存路徑
+```
+
+在 `set -e`／`$ErrorActionPreference='Stop'` 下，第一條會讓**本來會成功的命令失敗**。
+修法是先判斷 token 是否在**程式位置**（命令字本身，或已知直譯器／runner 的引數），並且跳過
+`#` 註解與單引號 payload。覆蓋測試：
+`an argument to a non-interpreter program is left alone`、
+`a script name mentioned in a comment is not a program the command runs`、
+`a single-quoted shell payload is left exactly as written`、
+`an interpreter flag does not hide the script argument`。
+
+#### (7) glob 的指數回溯把整個 session 卡死
+
+`**/` 譯成 `(?:[^/]*/)*`，多個連續 `**` 就變成巢狀量詞：實測 pattern
+`**/**/**/**/**/**/**/**/**/**/x` 對 40 段路徑要 **55.5 秒**，而且是同步跑在工具派發的
+event loop 上——整個 session 停住。修法是把 glob 比對換成**逐段 DP**（O(段數×模式段數)），
+並先折疊連續的 `**`。覆蓋測試：`test/paths.test.mjs` 的
+`glob: a pathological multi-** pattern stays linear`（同樣的輸入必須在 1 秒內回 `false`）。
+
+#### (8) `scratch_import` 會刪掉非 UTF-8 的原檔
+
+舊版用 `readFileSync(path, 'utf8')` 讀 → 有損解碼成 U+FFFD → 存進 vault → 再用**同一份解碼結果**
+比對「驗證一致」→ 刪掉唯一完好的原檔。GBK 中文註解、Latin-1、二進位檔全中。
+修法：讀 Buffer、比對 Buffer、只有「UTF-8 往返逐位元組相同」才允許刪除，否則回報 `not-utf8` 並保留原檔。
+同時接上分類器閘門：`src/`、`node_modules/`、`excludeGlobs` 命中的路徑一律 `refused`。
+
+#### (9) 「讀不到帳本」被當成「帳本空的」
+
+`_readRaw()` 把任何讀取失敗都吞成 `''`（EMFILE、AV 暫時鎖檔、EACCES），空結果還被快取在當時的
+`stat` 簽章下；接著 `purge` 從這份空快照改寫，**用空檔案覆蓋整份歷史**，而 `entries/` 目錄都還在。
+修法：`undefined`（讀不到）與 `''`（空的）分開；讀不到時不快取、不改寫，`purge` 回
+`ledgerUnreadable: true`。另一併處理了「append 途中斷電使兩筆記錄黏成一行」——append 前先補換行，
+解析時再對 `{"id":` 邊界做救援。
+
 ---
 
 ## 第 2 層：載入驗證（重啟後第一步）
@@ -141,8 +200,9 @@ Get-Content C:\Users\TINGOD\.dsh\scratch-vault\shell-roots.log -Tail 5
 Get-Content C:\Users\TINGOD\.dsh\profiles\desktop\package.json | Select-String 'dsh-scratch-vault'
 ```
 
-`shell-roots.log` 應該出現 `apply build=marketready-v6`。
-若仍是更早的 tag（`shellroots-v1`、`workspaceroot-v2`、`shellvar-dsh-env-v3`、`shellrewrite-v4`、`cwdresolve-v5`），代表跑的是舊模組 → 沒有真正重啟。
+`shell-roots.log` 應該出現 `apply build=marketready-v9`。
+若仍是更早的 tag（`shellroots-v1`、`workspaceroot-v2`、`shellvar-dsh-env-v3`、`shellrewrite-v4`、`cwdresolve-v5`、`marketready-v6`、`marketready-v7`、`marketready-v8`），代表跑的是舊模組 → 沒有真正重啟。
+同一行現在還帶 `enabled=true|false` 與 `purged=N`：後者是這次掛載套用 `retainDays` 清掉的條目數（`autoPurge: false` 或 `enabled: false` 時恆為 0）。
 
 ## 第 3 層：端到端行為驗證（重啟後）
 
@@ -193,9 +253,9 @@ Test-Path 'C:\Users\TINGOD\Documents\deepseek-harness\default-workspace\_probe_e
 
 ## 目前狀態
 
-- 第 1 層：**91/91 綠**（可立刻重跑）。
+- 第 1 層：**124/124 綠**（可立刻重跑）。
 - 第 2、3 層：**待重啟**。程式碼已修好並測過，但依上面的模組快取結論，不重啟不會生效。
-  判斷方式只有一個：`shell-roots.log` 最後一行是不是 `apply build=marketready-v6`。
+  判斷方式只有一個：`shell-roots.log` 最後一行是不是 `apply build=marketready-v9`。
 
 ## 已知限制
 
@@ -204,6 +264,7 @@ Test-Path 'C:\Users\TINGOD\Documents\deepseek-harness\default-workspace\_probe_e
 3. **收納庫在沙箱外**——`<vaultDir>` 在 `DSH_HOME` 底下，agent 透過 shell 跑的程式**寫不進去**；
    收攏只可能在宿主側發生，所以才有 `scratch_import` 這個工具。
 4. **shell 指令改寫是保守的**——glob 旁的匹配、已存在的檔案、含空白的替換路徑、
-   `cd` 之後的相對路徑、任何 shell 變數形式，一律跳過。這是刻意的：**漏改一次只是少收一個檔，
+   `cd` 之後的相對路徑、任何 shell 變數形式，以及不在程式位置的一切（`#` 註解、
+   commit message、`grep` pattern、引號內的 payload）一律跳過。這是刻意的：**漏改一次只是少收一個檔，
    誤改一次會弄壞一條本來能跑的命令。**
 5. **需要完整重啟**才能載入 `lib/` 改動。
