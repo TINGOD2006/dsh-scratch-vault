@@ -14,8 +14,8 @@
 
 - 倉庫已公開：`github.com/TINGOD2006/dsh-scratch-vault`（2026-10-18 建立，已加 `dsh-plugin` 等 12 個 topic）。
 - `gh` CLI **2.102.0 已安裝且已登入**（帳號 `TINGOD2006`，token 具 `repo`／`workflow`／`gist` 權限，存於 keyring）。
-- npm 已發佈 `0.2.0`、`0.2.1`（`latest` 目前是 `0.2.1`）；本機 `dist-tag` 之外的 versions 由 `tingod2006` 維護。
-- `npm whoami` 在本機受限 shell 內回 **`E401`**——發佈新版本需要先 `npm login`（keyring 認證在沙箱內拿不到）。
+- npm 已發佈 `0.2.0`、`0.2.1`、`0.3.1`（`latest` = `0.3.1`，2026-10-21）；皆由 `tingod2006` 維護。
+- `npm login` 已完成（`npm whoami` → `tingod2006`）。但**發佈仍必須在互動式終端**：npm 11 對寫入操作要求 2FA，非 TTY 環境會直接回 `EOTP`（見〈疑難排解〉）。
 - **插件市場（awesome-dsh-plugin）已收錄**：`data/plugins/TINGOD2006__dsh-scratch-vault.yml` 已在 `main` 上（sha `61cdbe6`）。清單是靜態指路，不記版本，因此改版只要推 GitHub 即可，不需要再開 PR。
 - git 身分已設：`TINGOD2006 <tinchiocherrychio@gmail.com>`。
 - 沙箱內推送需要繞過 credential helper：見〈疑難排解〉的 token 內嵌 URL 做法（已實測可用）。
@@ -45,11 +45,11 @@
 ## 前置作業（只做一次）
 
 - GitHub CLI：✅ 已安裝 `gh 2.102.0` 且 `gh auth login` 完成（keyring，帳號 `TINGOD2006`）。
-- npm 登入：⏳ **仍缺**。發佈新版本前在本機（非沙箱內）執行：
+- npm 登入：✅ 已完成（`npm whoami` → `tingod2006`）。發佈時要**在一般 PowerShell（非 DSH 內）**執行，2FA 才能互動。需要重新登入時：
 
 ```powershell
-npm login
-npm whoami    # 應顯示 tingod2006
+npm login --auth-type=web   # 印出 https://www.npmjs.com/login?next=/login/cli/... 讓你開瀏覽器核准
+npm whoami                  # 應顯示 tingod2006
 ```
 
 不想裝 `gh` 也可以：用瀏覽器在 GitHub 手動建立空倉庫、手動開 PR，本地照樣用 `git push`。
@@ -78,6 +78,16 @@ npm publish
 ```
 
 `package.json` 已設 `publishConfig.access = "public"`，不需額外參數。
+
+**2FA 是流程的一部分，不是意外。** 帳號開啟 2FA 後，npm 11 對 `publish` 要求互動式認證，命令會停在：
+
+```
+Authenticate your account at:
+https://www.npmjs.com/auth/cli/<uuid>
+Press ENTER to open in the browser...
+```
+
+按 Enter 開瀏覽器核准（若提示 `one-time password` 就輸入 authenticator 的 6 位數）。成功會印 `+ dsh-scratch-vault@x.y.z`，但因 `Your package is being processed and may take a few minutes to become available`，registry 的 `latest` 會晚 15–30 秒才更新——用 `(Invoke-RestMethod https://registry.npmjs.org/dsh-scratch-vault)."dist-tags"` 確認，不要只看命令輸出。
 
 之後每次改版：`npm version patch`（或 `minor`／`major`）會同時改版號並打 git tag，再 `git push --follow-tags` 與 `npm publish`。
 
@@ -135,6 +145,23 @@ git push origin add-dsh-scratch-vault
 載入器在開機時建好模組圖，並以解析後的 URL 為 key 快取每個模組。停用再啟用 bundle 只會重跑**快取模組**的 `apply()`，不會重新 import 檔案。所以安裝、升級，以及任何 `lib/` 改動，都必須完整重啟 DSH 才會生效。判斷是否真的載入新版本，看 `<vaultDir>/shell-roots.log` 最後一行的 build tag。
 
 ## 疑難排解
+
+### `npm publish` 回 `EOTP`（This operation requires a one-time password）
+
+兩個成因，先分清是哪一種：
+
+1. **在非互動環境執行**（DSH 的 shell、CI、包在腳本裡）。沒有 TTY，npm 無法提示 2FA，直接 `EOTP` 退出；而且認證網址在輸出與 debug log 裡都被 npm 遮成 `***`，拿不出來點。解法只有一個：在一般 PowerShell 視窗執行一次。已實測：同一台機器、同一個登入，在一般 PowerShell 就會走到 `Press ENTER to open in the browser` 並成功。
+2. **想用 token 繞過 2FA**。npm 已限制 bypass-2FA 的 granular token 用於直接發佈：
+
+   ```
+   npm notice npm tokens that bypass 2FA are being restricted for
+   account changes and direct publishing.
+   https://gh.io/npm-gat-bypass2fa-deprecation
+   ```
+
+   所以「建 Automation token」這條路發不出去。長期正解是 Trusted Publishing（GitHub Actions 以 OIDC 短效憑證發佈），短期就是手動一次。
+
+另外實測澄清：把帳號 2FA 從 `auth-and-writes` 改成 `auth-only`（Profile → Manage Two-Factor Authentication → 取消「Require two-factor authentication for write actions」）**不會**讓 `publish` 免 2FA，它只放寬登入；改完再 publish 仍回 `EOTP`。
 
 ### 從 DSH 工作階段內推送會失敗
 
