@@ -14,8 +14,8 @@
 
 - 倉庫已公開：`github.com/TINGOD2006/dsh-scratch-vault`（2026-10-18 建立，已加 `dsh-plugin` 等 12 個 topic）。
 - `gh` CLI **2.102.0 已安裝且已登入**（帳號 `TINGOD2006`，token 具 `repo`／`workflow`／`gist` 權限，存於 keyring）。
-- npm 已發佈 `0.2.0`、`0.2.1`、`0.3.1`（`latest` = `0.3.1`，2026-10-21）；皆由 `tingod2006` 維護。
-- `npm login` 已完成（`npm whoami` → `tingod2006`）。但**發佈仍必須在互動式終端**：npm 11 對寫入操作要求 2FA，非 TTY 環境會直接回 `EOTP`（見〈疑難排解〉）。
+- npm 已發佈 `0.2.0`、`0.2.1`、`0.3.1`、`0.3.2`（`latest` = `0.3.2`）；皆由 `tingod2006` 維護。`0.3.2` 起改由 GitHub Actions 的 Trusted Publishing 發佈，無 token、無 OTP，並帶 SLSA provenance。
+- `npm login` 已完成（`npm whoami` → `tingod2006`）。手動發佈仍必須在互動式終端：npm 11 對寫入操作要求 2FA，非 TTY 環境會直接回 `EOTP`（見〈疑難排解〉）。
 - **插件市場（awesome-dsh-plugin）已收錄**：`data/plugins/TINGOD2006__dsh-scratch-vault.yml` 已在 `main` 上（sha `61cdbe6`）。清單是靜態指路，不記版本，因此改版只要推 GitHub 即可，不需要再開 PR。
 - git 身分已設：`TINGOD2006 <tinchiocherrychio@gmail.com>`。
 - 沙箱內推送需要繞過 credential helper：見〈疑難排解〉的 token 內嵌 URL 做法（已實測可用）。
@@ -28,6 +28,7 @@
 | 0.2.1 | staged publish 的審批修正。 |
 | 0.3.0 | 帳本快取與原子改寫＋跨行程鎖、`autoPurge`、既有檔案保護、程式位置才改寫 shell（v7／v8）。 |
 | 0.3.1 | 29 個缺陷修復（vault 帳本正確性、攔截誤改寫、glob 指數回溯、UTF-8 收攏資料安全、設定警告與負快取），124 個測試（v9）。 |
+| 0.3.2 | 改用 GitHub Actions Trusted Publishing 發佈（`.github/workflows/publish.yml`）；程式碼與 0.3.1 相同。此版由 CI 自動發佈並附 provenance，實測全程無 OTP。 |
 
 ## 投稿硬性條件對照
 
@@ -119,6 +120,8 @@ npm 套件頁會顯示 *Published via GitHub Actions* 與 provenance 標章（�
 - 需要 npm ≥ 11.5.1；`setup-node` 帶的是 npm 10，所以 workflow 有一行 `npm install -g npm@11`。
 - Trusted Publishing 只對**同一個 repo** 的 workflow 有效；搬 repo 或改 workflow 檔名要回 npm 重設。
 - CI 失敗時 `npm test` 不會讓版本流出去；重新推一個新 tag 即可（同版號不能重發）。
+
+**已實測（2026-10-21）**：推 `v0.3.2` 後 workflow run `39577928182` 以 57 秒完成 `test → tag 驗證 → publish`，registry 於 `09:35:39Z` 出現 `0.3.2`，`dist.attestations` 指向 `https://registry.npmjs.org/-/npm/v1/attestations/dsh-scratch-vault@0.3.2`（SLSA provenance v1）。全程沒有任何 OTP 提示。runner 會對 `actions/checkout@v4`／`actions/setup-node@v4` 發出 Node 20 deprecation 註記（GitHub 已強制改用 Node 24 執行，不影響結果）；等下次動 workflow 時再升到 v5。
 
 ## 步驟 3：向 awesome-dsh-plugin 開 PR
 
