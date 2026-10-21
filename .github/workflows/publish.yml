@@ -1,0 +1,68 @@
+name: publish
+
+# Publishes to npm when a version tag is pushed, using Trusted Publishing
+# (GitHub OIDC). No npm token, no one-time password: the runner exchanges its
+# short-lived identity for a single publish credential.
+#
+# One-time setup on npmjs.com:
+#   package dsh-scratch-vault -> Settings -> Trusted Publisher -> GitHub Actions
+#   Organization or user: TINGOD2006
+#   Repository:           dsh-scratch-vault
+#   Workflow filename:    publish.yml
+#   Environment:          (leave empty)
+#
+# Release flow after that:
+#   npm version patch        # or minor/major; writes version + tag
+#   git push --follow-tags   # this workflow tests and publishes the tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # required: this is what lets npm verify the runner's identity
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest # the plugin targets Windows shells; test on the real one
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # setup-node ships npm 10; trusted publishing needs npm >= 11.5.1.
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Show versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Test
+        run: npm test
+
+      - name: Refuse a tag that does not match package.json
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          Write-Host "tag=$tag package.json=$version"
+          if ($tag -ne $version) {
+            Write-Error "tag $tag does not match package.json version $version"
+            exit 1
+          }
+
+      # --provenance attaches a signed statement that this tarball came from
+      # this commit; npm shows it on the package page.
+      - name: Publish
+        run: npm publish --provenance --access public

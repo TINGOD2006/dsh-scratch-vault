@@ -91,6 +91,35 @@ Press ENTER to open in the browser...
 
 之後每次改版：`npm version patch`（或 `minor`／`major`）會同時改版號並打 git tag，再 `git push --follow-tags` 與 `npm publish`。
 
+### 免 OTP：改用 Trusted Publishing（建議，已備妥 workflow）
+
+手動 `npm publish` 每次都要人站在終端前按 Enter／輸 OTP。要讓「推 tag 就自動發佈」，用 npm 的 **Trusted Publishing**：GitHub Actions 以 OIDC 向 npm 換一張**短效、單次用途**的發佈憑證，不需要任何 token，也就沒有可被竊取的長期密鑰。
+
+倉庫已經有 `.github/workflows/publish.yml`，推 `v*` tag 時會：`npm test` → 驗證 tag 與 `package.json` 版本一致 → `npm publish --provenance --access public`。
+
+**一次性設定**（在 npmjs.com，只需做一次）：
+
+1. 開 `https://www.npmjs.com/package/dsh-scratch-vault/settings`
+2. **Trusted Publishing** → **Add Trusted Publisher** → 選 **GitHub Actions**
+3. 填：Owner `TINGOD2006`、Repository `dsh-scratch-vault`、Workflow filename `publish.yml`、Environment 留空
+4. 儲存
+
+之後的發版流程只剩三步：
+
+```powershell
+npm version patch            # 改版號並建立 tag
+git push --follow-tags       # 推送 commit 與 tag，CI 接手測試＋發佈
+```
+
+npm 套件頁會顯示 *Published via GitHub Actions* 與 provenance 標章（可點回這次 commit）。
+
+**注意**：
+
+- Workflow 必須有 `permissions.id-token: write`（已寫在檔案裡），否則取不到 OIDC 憑證。
+- 需要 npm ≥ 11.5.1；`setup-node` 帶的是 npm 10，所以 workflow 有一行 `npm install -g npm@11`。
+- Trusted Publishing 只對**同一個 repo** 的 workflow 有效；搬 repo 或改 workflow 檔名要回 npm 重設。
+- CI 失敗時 `npm test` 不會讓版本流出去；重新推一個新 tag 即可（同版號不能重發）。
+
 ## 步驟 3：向 awesome-dsh-plugin 開 PR
 
 一個 PR 只能新增**一個**檔案：`data/plugins/<owner>__<repo>.yml`。本倉庫對應的內容是：
@@ -162,6 +191,8 @@ git push origin add-dsh-scratch-vault
    所以「建 Automation token」這條路發不出去。長期正解是 Trusted Publishing（GitHub Actions 以 OIDC 短效憑證發佈），短期就是手動一次。
 
 另外實測澄清：把帳號 2FA 從 `auth-and-writes` 改成 `auth-only`（Profile → Manage Two-Factor Authentication → 取消「Require two-factor authentication for write actions」）**不會**讓 `publish` 免 2FA，它只放寬登入；改完再 publish 仍回 `EOTP`。
+
+長期解法是改用 CI 發佈，見〈步驟 2 → 免 OTP：改用 Trusted Publishing〉。
 
 ### 從 DSH 工作階段內推送會失敗
 
